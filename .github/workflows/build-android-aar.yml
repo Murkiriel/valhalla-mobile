@@ -88,6 +88,19 @@ jobs:
           distribution: "temurin"
           cache: gradle
 
+      # The Android Gradle Plugin strips debug symbols only when it finds the NDK it expects inside the SDK; on newer
+      # runner images it logs "Unable to strip ... packaging them as they are" and the AAR grows from ~10 MB to
+      # ~130 MB. Strip here with the NDK's llvm-strip, the same tool and flag the plugin uses.
+      - name: Strip native libraries
+        env:
+          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          for arch in arm64-v8a armeabi-v7a x86_64 x86; do
+            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded \
+              android/valhalla/src/main/jniLibs/$arch/libvalhalla-wrapper.so
+          done
+          ls -l android/valhalla/src/main/jniLibs/*/libvalhalla-wrapper.so
+
       - name: Assemble AAR
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -103,6 +116,25 @@ jobs:
           (cd dist && sha256sum valhalla-mobile-$version.aar > valhalla-mobile-$version.aar.sha256)
           cat dist/*.sha256 dist/native-sha256.txt
           echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Compare with Maven Central
+        run: |
+          url="https://repo1.maven.org/maven2/io/github/rallista/valhalla-mobile/${VERSION}/valhalla-mobile-${VERSION}.aar"
+          if curl -fsSL -o maven.aar "$url"; then
+            built=$(sha256sum < dist/valhalla-mobile-$VERSION.aar | cut -d' ' -f1)
+            published=$(sha256sum < maven.aar | cut -d' ' -f1)
+            echo "built from source: $built"
+            echo "Maven Central:     $published"
+            if [ "$built" = "$published" ]; then
+              echo "IDENTICAL to Maven Central" | tee dist/maven-central-comparison.txt
+            else
+              echo "::warning::differs from Maven Central" && echo "DIFFERS from Maven Central" > dist/maven-central-comparison.txt
+            fi
+            echo "built $built" >> dist/maven-central-comparison.txt
+            echo "maven $published" >> dist/maven-central-comparison.txt
+          else
+            echo "::warning::version $VERSION not found on Maven Central"
+          fi
 
       - name: Upload AAR
         uses: actions/upload-artifact@v4
